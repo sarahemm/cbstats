@@ -1,0 +1,54 @@
+#!/usr/bin/ruby
+
+require 'inifile'
+require 'nokogiri'
+require 'open-uri'
+require 'pp'
+require 'RRD'
+
+def get_page_stats(url, cam_type)
+  total_viewers = total_broadcasters = 0;
+  puts "Getting data from #{url}#{cam_type}..."
+  page = Nokogiri::HTML(open("#{url}/#{cam_type}"))
+
+  # get stats about the cams on this page
+  cams = page.css("li[class='cams']")
+  cams.each do |cam|
+    cam_stats = cam.children[0].text
+    viewers = /\d+ mins?, (\d+) viewers?/.match(cam_stats)[1].to_i
+    total_viewers += viewers
+  end
+  total_broadcasters += cams.length
+  
+  # if there's a next page, get stats from the next page too
+  next_page_link = page.css("a[class='next endless_page_link']")
+  if(next_page_link[0]) then
+    next_page_subdir = next_page_link[0]['href']
+    next_page_stats = get_page_stats(url, next_page_subdir) 
+    total_broadcasters += next_page_stats[:broadcasters]
+    total_viewers += next_page_stats[:viewers]
+  end
+  
+  {:broadcasters => total_broadcasters, :viewers => total_viewers}
+end
+
+cfg = IniFile.load(File.expand_path("cbstats.ini"))
+base_url = cfg['site']['BaseURL']
+cam_type = cfg['site']['CamType']
+
+stats = get_page_stats(base_url, cam_type);
+
+rrdfile = "#{cam_type}.rrd"
+if(!File.exists?(rrdfile)) then
+  puts "Creating database for #{cam_type}"
+  RRD.create(rrdfile, "--step", "900",
+    "DS:broadcasters:GAUGE:1800:0:1000",
+    "DS:viewers:GAUGE:1800:0:25000",
+    "RRA:AVERAGE:0.5:15:17520",	# 15-minutely data for a year
+    "RRA:AVERAGE:0.5:60:43800",	# hourly data for 5y
+  )
+end
+RRD.update rrdfile, "N:#{stats[:broadcasters]}|#{stats[:viewers]}"
+
+print "#{stats[:broadcasters]} broadcasters, #{stats[:viewers]} viewers. "
+puts "Viewer to broadcaster ratio #{stats[:viewers] / stats[:broadcasters]}:1"
